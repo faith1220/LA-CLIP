@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+
+log/
+runs/
+train_log/
+data_local/
+download/
+weight_local/
+
+.DS_Store
