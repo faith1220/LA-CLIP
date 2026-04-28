@@ -1,0 +1,14 @@
+Traceback (most recent call last):
+  File "/home/hyz/MyDisk/prompt/AF-CLIP-clean/experiments/cap_baseline_crossdomain/parse_results.py", line 356, in <module>
+    main()
+  File "/home/hyz/MyDisk/prompt/AF-CLIP-clean/experiments/cap_baseline_crossdomain/parse_results.py", line 344, in main
+    write_summary_csv(rows, report_root / "results_summary.csv")
+  File "/home/hyz/MyDisk/prompt/AF-CLIP-clean/experiments/cap_baseline_crossdomain/parse_results.py", line 209, in write_summary_csv
+    writer.writerow(serializable)
+  File "/home/hyz/anaconda3/lib/python3.11/csv.py", line 154, in writerow
+    return self.writer.writerow(self._dict_to_list(rowdict))
+                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/hyz/anaconda3/lib/python3.11/csv.py", line 149, in _dict_to_list
+    raise ValueError("dict contains fields not in fieldnames: "
+ValueError: dict contains fields not in fieldnames: 'experiment_name'
+Result parser exit code: 1

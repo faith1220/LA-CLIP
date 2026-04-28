@@ -1,0 +1,5 @@
+experiment	start_time	end_time	exit_code	tee_log	ckpt_dir
+mvtec_to_visa_A0_baseline	2026-04-28 10:38:01	2026-04-28 10:38:07	1	/home/hyz/MyDisk/prompt/AF-CLIP-clean/experiments/cap_baseline_crossdomain/logs/mvtec_to_visa_A0_baseline.log	/home/hyz/MyDisk/prompt/AF-CLIP-clean/experiments/cap_baseline_crossdomain/ckpts/mvtec_to_visa_A0_baseline
+mvtec_to_visa_A1_cap	2026-04-28 10:38:07	2026-04-28 10:38:13	1	/home/hyz/MyDisk/prompt/AF-CLIP-clean/experiments/cap_baseline_crossdomain/logs/mvtec_to_visa_A1_cap.log	/home/hyz/MyDisk/prompt/AF-CLIP-clean/experiments/cap_baseline_crossdomain/ckpts/mvtec_to_visa_A1_cap
+visa_to_mvtec_A0_baseline	2026-04-28 10:38:13	2026-04-28 10:38:19	1	/home/hyz/MyDisk/prompt/AF-CLIP-clean/experiments/cap_baseline_crossdomain/logs/visa_to_mvtec_A0_baseline.log	/home/hyz/MyDisk/prompt/AF-CLIP-clean/experiments/cap_baseline_crossdomain/ckpts/visa_to_mvtec_A0_baseline
+visa_to_mvtec_A1_cap	2026-04-28 10:38:19	2026-04-28 10:38:25	1	/home/hyz/MyDisk/prompt/AF-CLIP-clean/experiments/cap_baseline_crossdomain/logs/visa_to_mvtec_A1_cap.log	/home/hyz/MyDisk/prompt/AF-CLIP-clean/experiments/cap_baseline_crossdomain/ckpts/visa_to_mvtec_A1_cap

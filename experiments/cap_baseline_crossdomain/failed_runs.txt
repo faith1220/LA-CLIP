@@ -1,0 +1,4 @@
+mvtec_to_visa_A0_baseline	/home/hyz/MyDisk/prompt/AF-CLIP-clean/experiments/cap_baseline_crossdomain/logs/mvtec_to_visa_A0_baseline.log
+mvtec_to_visa_A1_cap	/home/hyz/MyDisk/prompt/AF-CLIP-clean/experiments/cap_baseline_crossdomain/logs/mvtec_to_visa_A1_cap.log
+visa_to_mvtec_A0_baseline	/home/hyz/MyDisk/prompt/AF-CLIP-clean/experiments/cap_baseline_crossdomain/logs/visa_to_mvtec_A0_baseline.log
+visa_to_mvtec_A1_cap	/home/hyz/MyDisk/prompt/AF-CLIP-clean/experiments/cap_baseline_crossdomain/logs/visa_to_mvtec_A1_cap.log

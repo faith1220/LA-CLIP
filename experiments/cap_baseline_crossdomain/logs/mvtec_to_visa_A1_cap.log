@@ -1,0 +1,91 @@
+============================================================
+Experiment: mvtec_to_visa_A1_cap
+Start time: 2026-04-28 10:38:07
+GPU_ID: 0
+Command: /home/hyz/anaconda3/bin/python main.py --dataset mvtec --test_dataset visa --data_dir /home/hyz/MyDisk/prompt/AF-CLIP-clean/data_local --clip_download_dir /home/hyz/.cache/clip --log_dir /home/hyz/MyDisk/prompt/AF-CLIP-clean/experiments/cap_baseline_crossdomain/ckpts/mvtec_to_visa_A1_cap --model ViT-L/14@336px --epochs 2 --batch_size 8 --img_size 518 --feature_layers 6 12 18 24 --memory_layers 6 12 18 24 --fewshot 0 --seed 122 --fg_prompt off --use_lsar 0 --use_mapb 0 --use_mvti 0 --score_mode clip --use_cap_prompt --cap_num_abnormal_prompts 10 --cap_n_normal_ctx 4 --cap_n_abnormal_ctx 4 --lambda_cap_orth 0.01 --cap_abnormal_agg mean_feature --cap_log_interval 1 --dump_prompt_diag_json /home/hyz/MyDisk/prompt/AF-CLIP-clean/experiments/cap_baseline_crossdomain/reports/mvtec_to_visa_A1_cap_prompt_diag.json 
+============================================================
+[mvtec_to_visa_A1_cap] Command: /home/hyz/anaconda3/bin/python main.py --dataset mvtec --test_dataset visa --data_dir /home/hyz/MyDisk/prompt/AF-CLIP-clean/data_local --clip_download_dir /home/hyz/.cache/clip --log_dir /home/hyz/MyDisk/prompt/AF-CLIP-clean/experiments/cap_baseline_crossdomain/ckpts/mvtec_to_visa_A1_cap --model ViT-L/14@336px --epochs 2 --batch_size 8 --img_size 518 --feature_layers 6 12 18 24 --memory_layers 6 12 18 24 --fewshot 0 --seed 122 --fg_prompt off --use_lsar 0 --use_mapb 0 --use_mvti 0 --score_mode clip --use_cap_prompt --cap_num_abnormal_prompts 10 --cap_n_normal_ctx 4 --cap_n_abnormal_ctx 4 --lambda_cap_orth 0.01 --cap_abnormal_agg mean_feature --cap_log_interval 1 --dump_prompt_diag_json /home/hyz/MyDisk/prompt/AF-CLIP-clean/experiments/cap_baseline_crossdomain/reports/mvtec_to_visa_A1_cap_prompt_diag.json 
+[main.py][line:331][INFO] --------args----------
+[main.py][line:333][INFO] clip_download_dir: /home/hyz/.cache/clip
+[main.py][line:333][INFO] data_dir: /home/hyz/MyDisk/prompt/AF-CLIP-clean/data_local
+[main.py][line:333][INFO] dataset: mvtec
+[main.py][line:333][INFO] model: ViT-L/14@336px
+[main.py][line:333][INFO] batch_size: 8
+[main.py][line:333][INFO] lr: 0.0001
+[main.py][line:333][INFO] alpha: 0.1
+[main.py][line:333][INFO] epochs: 2
+[main.py][line:333][INFO] prompt_len: 12
+[main.py][line:333][INFO] fg_prompt: off
+[main.py][line:333][INFO] num_ab_prompts: 4
+[main.py][line:333][INFO] use_cap_prompt: True
+[main.py][line:333][INFO] cap_num_abnormal_prompts: 10
+[main.py][line:333][INFO] cap_n_normal_ctx: 4
+[main.py][line:333][INFO] cap_n_abnormal_ctx: 4
+[main.py][line:333][INFO] cap_ctx_init: random
+[main.py][line:333][INFO] lambda_cap_orth: 0.01
+[main.py][line:333][INFO] cap_abnormal_agg: mean_feature
+[main.py][line:333][INFO] cap_log_interval: 1
+[main.py][line:333][INFO] category: None
+[main.py][line:333][INFO] fewshot: 0
+[main.py][line:333][INFO] seed: 122
+[main.py][line:333][INFO] log_dir: /home/hyz/MyDisk/prompt/AF-CLIP-clean/experiments/cap_baseline_crossdomain/ckpts/mvtec_to_visa_A1_cap
+[main.py][line:333][INFO] suffix: defect
+[main.py][line:333][INFO] img_size: 518
+[main.py][line:333][INFO] feature_layers: [6, 12, 18, 24]
+[main.py][line:333][INFO] test_dataset: ['visa']
+[main.py][line:333][INFO] weight: None
+[main.py][line:333][INFO] vis: 0
+[main.py][line:333][INFO] vis_dir: ./vis_results/
+[main.py][line:333][INFO] memory_layers: [6, 12, 18, 24]
+[main.py][line:333][INFO] lambda1: 1
+[main.py][line:333][INFO] lambda2: 1
+[main.py][line:333][INFO] use_lsar: 0
+[main.py][line:333][INFO] lsar_bottleneck_ratio: 4
+[main.py][line:333][INFO] lsar_zero_init: 1
+[main.py][line:333][INFO] use_mvti: 0
+[main.py][line:333][INFO] mvti_views: 2
+[main.py][line:333][INFO] use_mapb: 0
+[main.py][line:333][INFO] score_mode: clip
+[main.py][line:333][INFO] lambda_proto: 0.1
+[main.py][line:333][INFO] prototype_k: 4
+[main.py][line:333][INFO] prototype_momentum: 0.95
+[main.py][line:333][INFO] prototype_temperature: 0.07
+[main.py][line:333][INFO] prototype_max_samples: 4096
+[main.py][line:333][INFO] prototype_fusion_alpha: 0.25
+[main.py][line:333][INFO] mapb_branch_num: 4
+[main.py][line:333][INFO] mapb_branch_count: 4
+[main.py][line:333][INFO] mapb_aggregation: None
+[main.py][line:333][INFO] ab_agg: sum_prob
+[main.py][line:333][INFO] dump_prompt_diag_json: /home/hyz/MyDisk/prompt/AF-CLIP-clean/experiments/cap_baseline_crossdomain/reports/mvtec_to_visa_A1_cap_prompt_diag.json
+[main.py][line:333][INFO] debug_mapb: 0
+[main.py][line:333][INFO] mapb_debug_json: None
+[main.py][line:333][INFO] mapb_default_branch_num: 4
+[main.py][line:333][INFO] mapb_effective_branch_num: 4
+[main.py][line:333][INFO] _command: main.py --dataset mvtec --test_dataset visa --data_dir /home/hyz/MyDisk/prompt/AF-CLIP-clean/data_local --clip_download_dir /home/hyz/.cache/clip --log_dir /home/hyz/MyDisk/prompt/AF-CLIP-clean/experiments/cap_baseline_crossdomain/ckpts/mvtec_to_visa_A1_cap --model ViT-L/14@336px --epochs 2 --batch_size 8 --img_size 518 --feature_layers 6 12 18 24 --memory_layers 6 12 18 24 --fewshot 0 --seed 122 --fg_prompt off --use_lsar 0 --use_mapb 0 --use_mvti 0 --score_mode clip --use_cap_prompt --cap_num_abnormal_prompts 10 --cap_n_normal_ctx 4 --cap_n_abnormal_ctx 4 --lambda_cap_orth 0.01 --cap_abnormal_agg mean_feature --cap_log_interval 1 --dump_prompt_diag_json /home/hyz/MyDisk/prompt/AF-CLIP-clean/experiments/cap_baseline_crossdomain/reports/mvtec_to_visa_A1_cap_prompt_diag.json
+[main.py][line:334][INFO] --------args----------
+
+[main.py][line:187][INFO] Prompt configuration: use_cap_prompt=True, fg_prompt=off, num_ab_prompts=4, prompt_len=12, ab_agg=sum_prob, cap_abnormal_agg=mean_feature, text_feature_shape=[2, 768], prompt_shapes={'cap_normal_ctx': [4, 768], 'cap_abnormal_ctx': [10, 4, 768]}
+[main.py][line:231][INFO] CAP configuration: use_cap_prompt=True, cap_num_abnormal_prompts=10, cap_n_normal_ctx=4, cap_n_abnormal_ctx=4, lambda_cap_orth=0.010000, cap_abnormal_agg=mean_feature, cap_ctx_init=random
+[main.py][line:241][INFO] CAP trainable parameters: count=33792, names=['normal_ctx', 'abnormal_ctx']
+[main.py][line:161][INFO] Trainable parameter summary: count=2134016, names=['cap_prompt.normal_ctx', 'cap_prompt.abnormal_ctx', 'adaptor.attention.attn.to_q.weight', 'adaptor.attention.attn.to_k.weight', 'adaptor.attention.attn.to_v.weight', 'adaptor.attention.attn.to_out.0.weight', 'adaptor.attention.attn.to_out.0.bias', 'adaptor.attention.norm.weight', 'adaptor.attention.norm.bias']
+resblocks:  24
+torch.Size([577, 1024])
+resblocks:  12
+Traceback (most recent call last):
+  File "/home/hyz/MyDisk/prompt/AF-CLIP-clean/main.py", line 719, in <module>
+    train(args)
+  File "/home/hyz/MyDisk/prompt/AF-CLIP-clean/main.py", line 481, in train
+    instantiated_datasets[ds_name] = dataset_builders[ds_name]()
+                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/hyz/MyDisk/prompt/AF-CLIP-clean/main.py", line 456, in <lambda>
+    "mvtec": lambda: MVTecDataset(root=args.data_dir, train=False, category=None, transform=clip_transform, gt_target_transform=target_transform),
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/hyz/MyDisk/prompt/AF-CLIP-clean/dataset/mvtec.py", line 23, in __init__
+    self.preprocess()  
+    ^^^^^^^^^^^^^^^^^
+  File "/home/hyz/MyDisk/prompt/AF-CLIP-clean/dataset/mvtec.py", line 39, in preprocess
+    defect_types = os.listdir(os.path.join(img_dir, phase))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/home/hyz/MyDisk/prompt/AF-CLIP-clean/data_local/mvtec/carpet/train'
+End time: 2026-04-28 10:38:13
+Exit code: 1

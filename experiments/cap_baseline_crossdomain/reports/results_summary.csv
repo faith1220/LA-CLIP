@@ -1,0 +1,1 @@
+direction,train_dataset,test_dataset,method,I_AUROC,I_AP,I_F1,P_AUROC,P_AP,PRO,log_path,ckpt_path,status,exit_code,internal_log_path,prompt_diag_json,CAP_orth_loss,CAP_pair_cos_mean,CAP_pair_cos_max,CAP_pair_cos_min,prompt_source,prototype_fusion_applied

@@ -9,6 +9,9 @@ import torch.nn.functional as F
 from tqdm import tqdm
 import logging
 import os
+import shlex
+import sys
+import warnings
 from util.utils import eval_all_class
 import copy
 
@@ -46,20 +49,207 @@ def l1_loss(inputs, targets, reduction="mean"):
 
 
 def uses_prototype_score(args):
-    return bool(getattr(args, "use_mapb", 0)) or getattr(args, "score_mode", "clip") == "prototype"
+    return getattr(args, "score_mode", "clip") == "prototype"
 
 
-def load_training_components(clip_model, args, device):
+def uses_fg_prompt(clip_model):
+    return getattr(clip_model, "fg_prompt_mode", "off") == "on"
+
+
+def uses_cap_prompt(clip_model):
+    return bool(getattr(clip_model, "use_cap_prompt", False)) and getattr(clip_model, "cap_prompt", None) is not None
+
+
+def coerce_prompt_tensor(loaded_prompt):
+    if isinstance(loaded_prompt, torch.nn.Parameter):
+        loaded_prompt = loaded_prompt.detach()
+    if not torch.is_tensor(loaded_prompt):
+        raise TypeError("Expected prompt tensor, got {}".format(type(loaded_prompt)))
+    if loaded_prompt.ndim == 2:
+        loaded_prompt = loaded_prompt.unsqueeze(0)
+    if loaded_prompt.ndim != 3:
+        raise ValueError("Expected prompt tensor with shape [K, prompt_len, dim]")
+    return loaded_prompt
+
+
+def match_prompt_embedding(target_prompt, loaded_prompt):
+    loaded_prompt = coerce_prompt_tensor(loaded_prompt)
+    if isinstance(target_prompt, torch.nn.Parameter):
+        target_prompt = target_prompt.detach()
+    if target_prompt is None:
+        raise ValueError("Target prompt is not initialized")
+    if loaded_prompt.shape[1:] != target_prompt.shape[1:]:
+        raise ValueError(
+            "Prompt shape mismatch: loaded {} vs target {}".format(tuple(loaded_prompt.shape), tuple(target_prompt.shape))
+        )
+    if loaded_prompt.shape[0] == target_prompt.shape[0]:
+        matched_prompt = loaded_prompt
+    elif loaded_prompt.shape[0] == 1:
+        matched_prompt = loaded_prompt.repeat(target_prompt.shape[0], 1, 1)
+    elif target_prompt.shape[0] == 1:
+        matched_prompt = loaded_prompt.mean(dim=0, keepdim=True)
+    else:
+        index = torch.linspace(0, loaded_prompt.shape[0] - 1, steps=target_prompt.shape[0], device=loaded_prompt.device)
+        matched_prompt = loaded_prompt.index_select(0, index.round().long())
+    return matched_prompt.to(device=target_prompt.device, dtype=target_prompt.dtype)
+
+
+def extract_shared_prompt_tensor(loaded_prompt):
+    if isinstance(loaded_prompt, dict):
+        if "state_prompt_embedding" in loaded_prompt:
+            return coerce_prompt_tensor(loaded_prompt["state_prompt_embedding"])
+        if "prompt_embedding" in loaded_prompt:
+            return coerce_prompt_tensor(loaded_prompt["prompt_embedding"])
+        if "normal_prompt_embedding" in loaded_prompt and "abnormal_prompt_embedding" in loaded_prompt:
+            normal_prompt = coerce_prompt_tensor(loaded_prompt["normal_prompt_embedding"])
+            abnormal_prompt = coerce_prompt_tensor(loaded_prompt["abnormal_prompt_embedding"])
+            return torch.cat([normal_prompt, abnormal_prompt], dim=0).mean(dim=0, keepdim=True)
+        raise ValueError("Unsupported prompt checkpoint format: {}".format(sorted(loaded_prompt.keys())))
+    return coerce_prompt_tensor(loaded_prompt)
+
+
+def assign_prompt_embeddings(clip_model, loaded_prompt):
+    if uses_fg_prompt(clip_model):
+        if isinstance(loaded_prompt, dict) and "normal_prompt_embedding" in loaded_prompt and "abnormal_prompt_embedding" in loaded_prompt:
+            matched_normal_prompt = match_prompt_embedding(
+                clip_model.normal_prompt_embedding,
+                loaded_prompt["normal_prompt_embedding"],
+            )
+            matched_abnormal_prompt = match_prompt_embedding(
+                clip_model.abnormal_prompt_embedding,
+                loaded_prompt["abnormal_prompt_embedding"],
+            )
+        else:
+            shared_prompt = extract_shared_prompt_tensor(loaded_prompt).mean(dim=0, keepdim=True)
+            matched_normal_prompt = match_prompt_embedding(clip_model.normal_prompt_embedding, shared_prompt)
+            matched_abnormal_prompt = match_prompt_embedding(clip_model.abnormal_prompt_embedding, shared_prompt)
+        clip_model.normal_prompt_embedding = torch.nn.Parameter(matched_normal_prompt)
+        clip_model.abnormal_prompt_embedding = torch.nn.Parameter(matched_abnormal_prompt)
+        return
+
+    matched_prompt = match_prompt_embedding(
+        clip_model.state_prompt_embedding,
+        extract_shared_prompt_tensor(loaded_prompt),
+    )
+    clip_model.state_prompt_embedding = torch.nn.Parameter(matched_prompt)
+
+
+def build_prompt_checkpoint_payload(clip_model):
+    if uses_fg_prompt(clip_model):
+        return {
+            "fg_prompt": "on",
+            "num_ab_prompts": int(clip_model.abnormal_prompt_embedding.shape[0]),
+            "normal_prompt_embedding": clip_model.normal_prompt_embedding.detach().cpu(),
+            "abnormal_prompt_embedding": clip_model.abnormal_prompt_embedding.detach().cpu(),
+        }
+    return clip_model.state_prompt_embedding.detach().cpu()
+
+
+def get_trainable_parameter_summary(module):
+    trainable_names = []
+    trainable_count = 0
+    for name, param in module.named_parameters():
+        if not param.requires_grad:
+            continue
+        trainable_names.append(name)
+        trainable_count += param.numel()
+    return trainable_names, trainable_count
+
+
+def log_trainable_parameter_summary(logger, module, prefix="Trainable parameters"):
+    trainable_names, trainable_count = get_trainable_parameter_summary(module)
+    logger.info(
+        "{}: count={}, names={}".format(
+            prefix,
+            trainable_count,
+            trainable_names,
+        )
+    )
+
+
+def log_prompt_configuration(logger, clip_model, args, prefix="Prompt configuration"):
+    with torch.no_grad():
+        text_features = clip_model.encode_state_prompt(args=args)
+    if uses_cap_prompt(clip_model):
+        prompt_shapes = {
+            "cap_normal_ctx": list(clip_model.cap_prompt.normal_ctx.shape),
+            "cap_abnormal_ctx": list(clip_model.cap_prompt.abnormal_ctx.shape),
+        }
+    elif uses_fg_prompt(clip_model):
+        prompt_shapes = {
+            "normal_prompt_embedding": list(clip_model.normal_prompt_embedding.shape),
+            "abnormal_prompt_embedding": list(clip_model.abnormal_prompt_embedding.shape),
+        }
+    else:
+        prompt_shapes = {
+            "state_prompt_embedding": list(clip_model.state_prompt_embedding.shape),
+        }
+    logger.info(
+        "{}: use_cap_prompt={}, fg_prompt={}, num_ab_prompts={}, prompt_len={}, ab_agg={}, cap_abnormal_agg={}, text_feature_shape={}, prompt_shapes={}".format(
+            prefix,
+            bool(getattr(args, "use_cap_prompt", False)),
+            args.fg_prompt,
+            args.num_ab_prompts,
+            args.prompt_len,
+            getattr(args, "ab_agg", "sum_prob"),
+            getattr(args, "cap_abnormal_agg", "mean_feature"),
+            list(text_features.shape),
+            prompt_shapes,
+        )
+    )
+
+
+def log_prompt_forward_shapes(logger, clip_model, prefix="Prompt forward"):
+    prompt_debug = getattr(clip_model, "_latest_prompt_debug", None)
+    if not isinstance(prompt_debug, dict):
+        return
+    logger.info(
+        "{}: prompt_source={}, use_cap_prompt={}, fg_prompt={}, num_ab_prompts={}, ab_agg={}, cap_abnormal_agg={}, prototype_score_active={}, prototype_fusion_applied={}, text_feature_shape={}, scale_text_feature_shape={}, image_cls_logits_shape={}, image_cls_prob_shape={}, pixel_score_shape={}, pixel_prob_shape={}".format(
+            prefix,
+            prompt_debug.get("prompt_source"),
+            prompt_debug.get("use_cap_prompt"),
+            prompt_debug.get("fg_prompt"),
+            prompt_debug.get("num_ab_prompts"),
+            prompt_debug.get("ab_agg"),
+            prompt_debug.get("cap_abnormal_agg"),
+            prompt_debug.get("prototype_score_active"),
+            prompt_debug.get("prototype_fusion_applied"),
+            prompt_debug.get("text_feature_shape"),
+            prompt_debug.get("scale_text_feature_shape"),
+            prompt_debug.get("image_cls_logits_shape"),
+            prompt_debug.get("image_cls_prob_shape"),
+            prompt_debug.get("pixel_score_shape"),
+            prompt_debug.get("pixel_prob_shape"),
+        )
+    )
+
+
+def log_cap_configuration(logger, clip_model, args):
+    if not uses_cap_prompt(clip_model):
+        return
+    cap_trainable_names, cap_trainable_count = get_trainable_parameter_summary(clip_model.cap_prompt)
+    logger.info(
+        "CAP configuration: use_cap_prompt=%s, cap_num_abnormal_prompts=%d, cap_n_normal_ctx=%d, cap_n_abnormal_ctx=%d, lambda_cap_orth=%.6f, cap_abnormal_agg=%s, cap_ctx_init=%s",
+        bool(getattr(args, "use_cap_prompt", False)),
+        int(getattr(args, "cap_num_abnormal_prompts", 1)),
+        int(getattr(args, "cap_n_normal_ctx", 0)),
+        int(getattr(args, "cap_n_abnormal_ctx", 0)),
+        float(getattr(args, "lambda_cap_orth", 0.0)),
+        getattr(args, "cap_abnormal_agg", "mean_feature"),
+        getattr(args, "cap_ctx_init", "random"),
+    )
+    logger.info("CAP trainable parameters: count=%d, names=%s", cap_trainable_count, cap_trainable_names)
+
+
+def load_training_components(clip_model, args, device, logger=None):
     prompt_path = os.path.join(args.weight, "{}_prompt.pt".format(args.dataset))
     adaptor_path = os.path.join(args.weight, "{}_adaptor.pt".format(args.dataset))
     lsar_path = os.path.join(args.weight, "{}_lsar.pt".format(args.dataset))
     mapb_path = os.path.join(args.weight, "{}_mapb.pt".format(args.dataset))
+    cap_prompt_path = os.path.join(args.weight, "{}_cap_prompt.pt".format(args.dataset))
 
     prompt_state = torch.load(prompt_path, map_location=device)
-    if isinstance(prompt_state, torch.nn.Parameter):
-        prompt_state = prompt_state.detach()
-    clip_model.state_prompt_embedding = torch.nn.Parameter(prompt_state.to(device))
-    clip_model.state_prompt_embedding.requires_grad_(True)
+    assign_prompt_embeddings(clip_model, prompt_state)
 
     adaptor_state = torch.load(adaptor_path, map_location=device)
     if isinstance(adaptor_state, torch.nn.Module):
@@ -73,13 +263,24 @@ def load_training_components(clip_model, args, device):
     if getattr(clip_model, "prototype_bank", None) is not None and os.path.exists(mapb_path):
         clip_model.prototype_bank.load_state_dict(torch.load(mapb_path, map_location=device))
 
+    if uses_cap_prompt(clip_model):
+        if os.path.exists(cap_prompt_path):
+            cap_state = torch.load(cap_prompt_path, map_location=device)
+            clip_model.cap_prompt.load_state_dict(cap_state)
+        else:
+            message = "CAP prompt checkpoint not found at {}; using current initialization.".format(cap_prompt_path)
+            if logger is not None:
+                logger.warning(message)
+            else:
+                warnings.warn(message)
+
 
 def save_training_components(clip_model, args, logger):
     checkpoint_dir = os.path.join(args.log_dir, "checkpoints")
     os.makedirs(checkpoint_dir, exist_ok=True)
 
     torch.save(
-        clip_model.state_prompt_embedding.detach().cpu(),
+        build_prompt_checkpoint_payload(clip_model),
         os.path.join(checkpoint_dir, "{}_prompt.pt".format(args.dataset)),
     )
     torch.save(
@@ -97,6 +298,12 @@ def save_training_components(clip_model, args, logger):
         torch.save(
             clip_model.prototype_bank.state_dict(),
             os.path.join(checkpoint_dir, "{}_mapb.pt".format(args.dataset)),
+        )
+
+    if uses_cap_prompt(clip_model):
+        torch.save(
+            clip_model.cap_prompt.state_dict(),
+            os.path.join(checkpoint_dir, "{}_cap_prompt.pt".format(args.dataset)),
         )
 
     logger.info("Saved checkpoints to %s", checkpoint_dir)
@@ -145,6 +352,79 @@ def patch_alignment_loss(img_tokens, labels, gts):
         sim = sim if sim > 0 else 0
         total_sim = total_sim + sim
     return total_sim / len(img_tokens)
+
+
+def infer_default_mapb_branch_num(args):
+    return max(int(getattr(args, "num_ab_prompts", 4) or 4), 1)
+
+
+def normalize_ab_agg_mode(raw_value):
+    mapping = {
+        "sum_prob": "sum_prob",
+        "sum": "sum_prob",
+        "max_prob": "max_prob",
+        "max": "max_prob",
+        "mean_prob": "mean_prob",
+        "mean": "mean_prob",
+        "logsumexp_logit": "logsumexp_logit",
+        "logsumexp": "logsumexp_logit",
+    }
+    value = "sum_prob" if raw_value in (None, "") else str(raw_value).strip().lower()
+    if value not in mapping:
+        raise ValueError("Unsupported ab_agg mode: {}".format(raw_value))
+    return mapping[value]
+
+
+def normalize_cap_agg_mode(raw_value):
+    mapping = {
+        "mean_feature": "mean_feature",
+        "prob_sum": "prob_sum",
+        "max_logit": "max_logit",
+    }
+    value = "mean_feature" if raw_value in (None, "") else str(raw_value).strip().lower()
+    if value not in mapping:
+        raise ValueError("Unsupported cap_abnormal_agg mode: {}".format(raw_value))
+    return mapping[value]
+
+
+def normalize_runtime_args(args):
+    args.use_cap_prompt = bool(getattr(args, "use_cap_prompt", False))
+    args.cap_num_abnormal_prompts = max(int(getattr(args, "cap_num_abnormal_prompts", 10)), 1)
+    args.cap_n_normal_ctx = max(int(getattr(args, "cap_n_normal_ctx", 4)), 0)
+    args.cap_n_abnormal_ctx = max(int(getattr(args, "cap_n_abnormal_ctx", 4)), 0)
+    args.cap_abnormal_agg = normalize_cap_agg_mode(getattr(args, "cap_abnormal_agg", "mean_feature"))
+    args.cap_log_interval = max(int(getattr(args, "cap_log_interval", 1)), 1)
+    requested_prompt_num = max(int(getattr(args, "num_ab_prompts", 4) or 4), 1)
+    for legacy_value in [getattr(args, "mapb_branch_num", 0), getattr(args, "mapb_branch_count", 0)]:
+        if legacy_value not in (None, 0):
+            requested_prompt_num = max(int(legacy_value), 1)
+    args.num_ab_prompts = requested_prompt_num
+    args.mapb_branch_num = requested_prompt_num
+    args.mapb_branch_count = requested_prompt_num
+    if args.use_cap_prompt:
+        if getattr(args, "fg_prompt", "off") == "on":
+            warnings.warn("use_cap_prompt=True overrides legacy fg_prompt; forcing fg_prompt=off.")
+        args.fg_prompt = "off"
+        args.use_mapb = int(getattr(args, "use_mapb", 0))
+        if args.use_mapb and getattr(args, "score_mode", "clip") == "clip":
+            args.score_mode = "prototype"
+    else:
+        if int(getattr(args, "use_mapb", 0)):
+            args.fg_prompt = "on"
+        args.use_mapb = 1 if getattr(args, "fg_prompt", "off") == "on" else 0
+        if args.use_mapb and getattr(args, "score_mode", "clip") == "prototype":
+            args.score_mode = "clip"
+    args.mapb_default_branch_num = infer_default_mapb_branch_num(args)
+    args.mapb_effective_branch_num = args.mapb_default_branch_num
+    args.ab_agg = normalize_ab_agg_mode(getattr(args, "ab_agg", "sum_prob"))
+    if getattr(args, "mapb_aggregation", None) not in (None, ""):
+        args.ab_agg = normalize_ab_agg_mode(getattr(args, "mapb_aggregation"))
+    if not hasattr(args, "_command") or args._command is None:
+        args._command = " ".join(shlex.quote(token) for token in sys.argv)
+    if getattr(args, "debug_mapb", 0) and not getattr(args, "mapb_debug_json", None):
+        experiment_name = os.path.basename(os.path.abspath(args.log_dir)) if getattr(args, "log_dir", None) else "mapb_debug"
+        args.mapb_debug_json = os.path.join(args.log_dir, f"{experiment_name}_mapb_debug.json")
+    return args
     
 
 def train(args):
@@ -168,6 +448,9 @@ def train(args):
     
     clip_model = clip_model.to(device)
     clip_model.insert(args=args, tokenizer=tokenize, device=device)
+    log_prompt_configuration(logger, clip_model, args)
+    log_cap_configuration(logger, clip_model, args)
+    log_trainable_parameter_summary(logger, clip_model, prefix="Trainable parameter summary")
 
     dataset_builders = {
         "mvtec": lambda: MVTecDataset(root=args.data_dir, train=False, category=None, transform=clip_transform, gt_target_transform=target_transform),
@@ -213,12 +496,20 @@ def train(args):
     train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
     
     if args.weight is not None:
-        load_training_components(clip_model, args, device)
+        load_training_components(clip_model, args, device, logger=logger)
+        log_prompt_configuration(logger, clip_model, args, prefix="Loaded prompt configuration")
+        log_cap_configuration(logger, clip_model, args)
     else:
         optimizer = torch.optim.Adam(clip_model.get_trainable_parameters(), lr=args.lr, betas=(0.5, 0.999))
+        first_debug_loss_logged = False
        
         for epoch in range(1, args.epochs + 1):
             total_loss = []
+            original_loss_meter = []
+            cap_orth_loss_meter = []
+            cap_pair_cos_mean_meter = []
+            cap_pair_cos_max_meter = []
+            cap_pair_cos_min_meter = []
             mapb_proto_loss = []
             mapb_ready_ratio = []
             mapb_fallback_ratio = []
@@ -229,21 +520,41 @@ def train(args):
                 imgs = imgs.to(device)
                 raw_gts = gts.to(device)
                 predict_labels, predict_masks, img_tokens = clip_model.detect_forward_seg(imgs, args=args, gts=raw_gts)
+                if epoch == 1 and len(total_loss) == 0:
+                    log_prompt_forward_shapes(logger, clip_model, prefix="First train forward")
                 gts = raw_gts
                 gts = F.interpolate(gts, size=predict_masks[0].shape[-2:], mode='bilinear')
                 gts[gts < 0.5] = 0
                 gts[gts > 0.5] = 1
                 
-                loss = focal_loss(predict_labels, labels) + args.lambda1 * (focal_loss(predict_masks, gts) + l1_loss(predict_masks, gts)) + args.lambda2 * patch_alignment_loss(img_tokens, labels, gts) 
+                original_loss = focal_loss(predict_labels, labels) + args.lambda1 * (focal_loss(predict_masks, gts) + l1_loss(predict_masks, gts)) + args.lambda2 * patch_alignment_loss(img_tokens, labels, gts)
+                loss = original_loss
+                cap_aux = getattr(clip_model, "_latest_cap_aux", None)
+                if args.use_cap_prompt and cap_aux is not None and cap_aux.get("cap_orth_loss") is not None:
+                    loss = loss + float(getattr(args, "lambda_cap_orth", 0.0)) * cap_aux["cap_orth_loss"]
                 mapb_aux = getattr(clip_model, "_latest_mapb_aux", None)
                 if uses_prototype_score(args) and args.lambda_proto > 0 and mapb_aux is not None and mapb_aux.get("prototype_loss_value") is not None:
                     loss = loss + args.lambda_proto * mapb_aux["prototype_loss_value"]
+                if bool(getattr(args, "debug_mapb", 0)) and not first_debug_loss_logged:
+                    logger.info(
+                        "[MAPB DEBUG] first_batch_loss=%.6f requested_branch_num=%s effective_branch_num=%s",
+                        float(loss.detach().item()),
+                        getattr(args, "mapb_branch_num", None),
+                        getattr(args, "mapb_effective_branch_num", None),
+                    )
+                    first_debug_loss_logged = True
                 optimizer.zero_grad()
                 
                 
                 loss.backward()
                 optimizer.step()
                 total_loss.append(loss.item())
+                original_loss_meter.append(float(original_loss.detach().item()))
+                if args.use_cap_prompt and cap_aux is not None:
+                    cap_orth_loss_meter.append(float(cap_aux["cap_orth_loss"].detach().item()))
+                    cap_pair_cos_mean_meter.append(float(cap_aux.get("cap_abn_pair_cos_mean", 0.0)))
+                    cap_pair_cos_max_meter.append(float(cap_aux.get("cap_abn_pair_cos_max", 0.0)))
+                    cap_pair_cos_min_meter.append(float(cap_aux.get("cap_abn_pair_cos_min", 0.0)))
                 if uses_prototype_score(args) and mapb_aux is not None:
                     if mapb_aux.get("prototype_loss") is not None:
                         mapb_proto_loss.append(float(mapb_aux["prototype_loss"].detach().item()))
@@ -253,9 +564,10 @@ def train(args):
                         mapb_fallback_ratio.append(float(mapb_aux["prototype_fallback_ratio"].detach().item()))
             if uses_prototype_score(args):
                 logger.info(
-                    "Epoch: {}/{}, Loss: {:.6f}, MAPB_loss: {:.6f}, MAPB_ready_ratio: {:.6f}, MAPB_fallback_ratio: {:.6f}".format(
+                    "Epoch: {}/{}, Original_loss: {:.6f}, Total_loss: {:.6f}, MAPB_loss: {:.6f}, MAPB_ready_ratio: {:.6f}, MAPB_fallback_ratio: {:.6f}".format(
                         epoch,
                         args.epochs,
+                        np.mean(original_loss_meter) if len(original_loss_meter) > 0 else 0.0,
                         np.mean(total_loss),
                         np.mean(mapb_proto_loss) if len(mapb_proto_loss) > 0 else 0.0,
                         np.mean(mapb_ready_ratio) if len(mapb_ready_ratio) > 0 else 0.0,
@@ -263,7 +575,26 @@ def train(args):
                     )
                 )
             else:
-                logger.info("Epoch: {}/{}, Loss: {:.6f}".format(epoch, args.epochs, np.mean(total_loss)))
+                logger.info(
+                    "Epoch: {}/{}, Original_loss: {:.6f}, Total_loss: {:.6f}".format(
+                        epoch,
+                        args.epochs,
+                        np.mean(original_loss_meter) if len(original_loss_meter) > 0 else 0.0,
+                        np.mean(total_loss),
+                    )
+                )
+            if args.use_cap_prompt and epoch % args.cap_log_interval == 0:
+                logger.info(
+                    "CAP Epoch: {}/{}, CAP_orth_loss: {:.6f}, lambda_cap_orth: {:.6f}, CAP_pair_cos_mean: {:.6f}, CAP_pair_cos_max: {:.6f}, CAP_pair_cos_min: {:.6f}".format(
+                        epoch,
+                        args.epochs,
+                        np.mean(cap_orth_loss_meter) if len(cap_orth_loss_meter) > 0 else 0.0,
+                        float(getattr(args, "lambda_cap_orth", 0.0)),
+                        np.mean(cap_pair_cos_mean_meter) if len(cap_pair_cos_mean_meter) > 0 else 0.0,
+                        np.mean(cap_pair_cos_max_meter) if len(cap_pair_cos_max_meter) > 0 else 0.0,
+                        np.mean(cap_pair_cos_min_meter) if len(cap_pair_cos_min_meter) > 0 else 0.0,
+                    )
+                )
         save_training_components(clip_model, args, logger)
     for dataset_name, test_ds in test_dataset_dict.items():
         logger.info("---------------------------{}------------------------------".format(dataset_name))
@@ -288,10 +619,30 @@ if __name__ == '__main__':
     parser.add_argument('--lr', type=float, default=0.0001, help='learning tate')
     
     parser.add_argument('--alpha', type=float, default=0.1, help='label combination')
-
+    
     parser.add_argument('--epochs', type=int, default=2, help='training epoch')
     
     parser.add_argument('--prompt_len', type=int, default=12, help='prompt length')
+
+    parser.add_argument('--fg_prompt', type=str, default='off', choices=['off', 'on'], help='legacy text-side multi-abnormal prompt branch; kept for backward compatibility and superseded by CAP when --use_cap_prompt is enabled')
+
+    parser.add_argument('--num_ab_prompts', type=int, default=4, help='number of abnormal prompts for the legacy fg_prompt branch')
+
+    parser.add_argument('--use_cap_prompt', action='store_true', default=False, help='enable CAP-style text-side compound abnormality prompt learning')
+
+    parser.add_argument('--cap_num_abnormal_prompts', type=int, default=10, help='number of complementary abnormal prompts in CAP')
+
+    parser.add_argument('--cap_n_normal_ctx', type=int, default=4, help='number of shared normal context tokens in CAP')
+
+    parser.add_argument('--cap_n_abnormal_ctx', type=int, default=4, help='number of abnormal-specific context tokens per CAP prompt')
+
+    parser.add_argument('--cap_ctx_init', type=str, default='random', choices=['random', 'template'], help='initialization mode for CAP learnable context tokens')
+
+    parser.add_argument('--lambda_cap_orth', type=float, default=0.01, help='loss weight for CAP abnormal-prompt orthogonal regularization')
+
+    parser.add_argument('--cap_abnormal_agg', type=str, default='mean_feature', choices=['mean_feature', 'prob_sum', 'max_logit'], help='aggregation rule for CAP abnormal text prompts')
+
+    parser.add_argument('--cap_log_interval', type=int, default=1, help='log CAP diagnostics every N epochs')
     
     parser.add_argument('--category', type=str, default=None, help='normal class')
     
@@ -325,11 +676,15 @@ if __name__ == '__main__':
 
     parser.add_argument('--lsar_bottleneck_ratio', type=int, default=4, help='bottleneck ratio for layer-specific adaptor residuals')
 
+    parser.add_argument('--lsar_zero_init', type=int, default=1, help='zero-initialize the last LSAR projection for residual start-up')
+
     parser.add_argument('--use_mvti', type=int, default=0, help='enable horizontal-flip multi-view test-time inference')
 
-    parser.add_argument('--use_mapb', type=int, default=0, help='enable MAPB prototype-bank scoring branch')
+    parser.add_argument('--mvti_views', type=int, default=2, help='number of multi-view test-time transforms when MVTI is enabled')
 
-    parser.add_argument('--score_mode', type=str, default='clip', choices=['clip', 'prototype'], help='score computation mode; prototype activates MAPB path')
+    parser.add_argument('--use_mapb', type=int, default=0, help='legacy MAPB compatibility switch; when CAP is enabled it activates the visual prototype-bank path without replacing CAP text scoring')
+
+    parser.add_argument('--score_mode', type=str, default='clip', choices=['clip', 'prototype'], help='score computation mode; prototype activates the optional prototype-bank path')
 
     parser.add_argument('--lambda_proto', type=float, default=0.1, help='loss weight for MAPB prototype-bank objective')
 
@@ -342,14 +697,24 @@ if __name__ == '__main__':
     parser.add_argument('--prototype_max_samples', type=int, default=4096, help='maximum normal patch tokens sampled per branch for MAPB updates')
 
     parser.add_argument('--prototype_fusion_alpha', type=float, default=0.25, help='fusion weight between CLIP anomaly map and MAPB anomaly map')
+
+    parser.add_argument('--mapb_branch_num', type=int, default=0, help='deprecated alias for num_ab_prompts; kept for compatibility with older scripts')
+
+    parser.add_argument('--mapb_branch_count', type=int, default=None, help=argparse.SUPPRESS)
+
+    parser.add_argument('--mapb_aggregation', type=str, default=None, help=argparse.SUPPRESS)
+
+    parser.add_argument('--ab_agg', type=str, default='sum_prob', choices=['sum_prob', 'max_prob', 'mean_prob', 'logsumexp_logit'], help='aggregation rule for the legacy fg_prompt multi-abnormal text branch')
+
+    parser.add_argument('--dump_prompt_diag_json', type=str, default='', help='optional json path for prompt diagnostics during evaluation; supports both legacy fg_prompt and CAP')
+
+    parser.add_argument('--debug_mapb', type=int, default=0, help='print and save MAPB debug configuration without changing training outputs')
+
+    parser.add_argument('--mapb_debug_json', type=str, default=None, help='optional JSON path for MAPB debug dump when debug_mapb=1')
     
     
     args = parser.parse_args()
-    if args.use_mapb:
-        args.score_mode = 'prototype'
-    elif args.score_mode == 'prototype':
-        args.use_mapb = 1
-    
+    args = normalize_runtime_args(args)
     args.seed = setup_seed(args.seed)
     train(args)
     

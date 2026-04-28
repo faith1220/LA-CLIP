@@ -29,6 +29,7 @@ from torchvision import models
 import math
 import matplotlib.pyplot as plt
 import seaborn as sns
+import json
 
 def transform_invert(img_, transform_train):
     if 'Normalize' in str(transform_train):
@@ -222,15 +223,163 @@ def detect_single_view(clip_model, imgs, args):
     return predict_labels, predict_masks
 
 
+def get_mvti_transforms(num_views):
+    num_views = max(int(num_views), 1)
+
+    transforms_list = [
+        (lambda x: x, lambda x: x),
+        (lambda x: torch.flip(x, dims=[-1]), lambda x: torch.flip(x, dims=[-1])),
+        (lambda x: torch.flip(x, dims=[-2]), lambda x: torch.flip(x, dims=[-2])),
+        (lambda x: torch.flip(x, dims=[-2, -1]), lambda x: torch.flip(x, dims=[-2, -1])),
+        (lambda x: x.transpose(-1, -2), lambda x: x.transpose(-1, -2)),
+        (lambda x: torch.flip(x.transpose(-1, -2), dims=[-1]), lambda x: torch.flip(x, dims=[-1]).transpose(-1, -2)),
+        (lambda x: torch.flip(x.transpose(-1, -2), dims=[-2]), lambda x: torch.flip(x, dims=[-2]).transpose(-1, -2)),
+        (lambda x: torch.flip(x.transpose(-1, -2), dims=[-2, -1]), lambda x: torch.flip(x, dims=[-2, -1]).transpose(-1, -2)),
+    ]
+    return transforms_list[: min(num_views, len(transforms_list))]
+
+
 def multi_view_inference(clip_model, imgs, args):
-    predict_labels, predict_masks = detect_single_view(clip_model, imgs, args)
-    flipped_imgs = torch.flip(imgs, dims=[-1])
-    flipped_labels, flipped_masks = detect_single_view(clip_model, flipped_imgs, args)
-    flipped_masks = torch.flip(flipped_masks, dims=[-1])
-    return (predict_labels + flipped_labels) * 0.5, (predict_masks + flipped_masks) * 0.5
+    mvti_views = int(getattr(args, "mvti_views", 2))
+    labels_per_view = []
+    masks_per_view = []
+    for forward_fn, inverse_fn in get_mvti_transforms(mvti_views):
+        view_imgs = forward_fn(imgs)
+        view_labels, view_masks = detect_single_view(clip_model, view_imgs, args)
+        labels_per_view.append(view_labels)
+        masks_per_view.append(inverse_fn(view_masks))
+    return torch.stack(labels_per_view, dim=0).mean(dim=0), torch.stack(masks_per_view, dim=0).mean(dim=0)
+
+def _init_prompt_diag_accumulator():
+    return {
+        "ab_agg": None,
+        "abnormal_text_features": None,
+        "update_calls": 0,
+        "image_prob_sum": None,
+        "image_prob_sq_sum": None,
+        "image_winner_count": None,
+        "image_count": 0,
+        "pixel_prob_sum": None,
+        "pixel_prob_sq_sum": None,
+        "pixel_winner_count": None,
+        "pixel_count": 0,
+    }
 
 
-def evaluation_pixel(clip_model:CLIP, dataset_name, dataloader, args, device):
+def _update_prompt_diag_accumulator(accumulator, analysis):
+    if accumulator is None or not isinstance(analysis, dict):
+        return
+    accumulator["update_calls"] += 1
+
+    abnormal_text_features = analysis.get("abnormal_text_features")
+    image_abnormal_probs = analysis.get("image_abnormal_probs")
+    pixel_abnormal_probs = analysis.get("pixel_abnormal_probs")
+
+    if torch.is_tensor(abnormal_text_features) and accumulator["abnormal_text_features"] is None:
+        accumulator["abnormal_text_features"] = abnormal_text_features.detach().float().cpu().clone()
+
+    if image_abnormal_probs is not None and torch.is_tensor(image_abnormal_probs):
+        image_abnormal_probs = image_abnormal_probs.detach().float().cpu()
+        num_channels = image_abnormal_probs.shape[-1]
+        if accumulator["image_prob_sum"] is None:
+            accumulator["image_prob_sum"] = torch.zeros(num_channels, dtype=torch.float32)
+            accumulator["image_prob_sq_sum"] = torch.zeros(num_channels, dtype=torch.float32)
+            accumulator["image_winner_count"] = torch.zeros(num_channels, dtype=torch.float32)
+        accumulator["image_prob_sum"] += image_abnormal_probs.sum(dim=0)
+        accumulator["image_prob_sq_sum"] += image_abnormal_probs.square().sum(dim=0)
+        winners = image_abnormal_probs.argmax(dim=-1)
+        accumulator["image_winner_count"] += torch.bincount(winners, minlength=num_channels).to(torch.float32)
+        accumulator["image_count"] += int(image_abnormal_probs.shape[0])
+
+    if pixel_abnormal_probs is not None and torch.is_tensor(pixel_abnormal_probs):
+        pixel_abnormal_probs = pixel_abnormal_probs.detach().float().cpu()
+        flat_pixel_probs = pixel_abnormal_probs.reshape(-1, pixel_abnormal_probs.shape[-1])
+        num_channels = flat_pixel_probs.shape[-1]
+        if accumulator["pixel_prob_sum"] is None:
+            accumulator["pixel_prob_sum"] = torch.zeros(num_channels, dtype=torch.float32)
+            accumulator["pixel_prob_sq_sum"] = torch.zeros(num_channels, dtype=torch.float32)
+            accumulator["pixel_winner_count"] = torch.zeros(num_channels, dtype=torch.float32)
+        accumulator["pixel_prob_sum"] += flat_pixel_probs.sum(dim=0)
+        accumulator["pixel_prob_sq_sum"] += flat_pixel_probs.square().sum(dim=0)
+        winners = flat_pixel_probs.argmax(dim=-1)
+        accumulator["pixel_winner_count"] += torch.bincount(winners, minlength=num_channels).to(torch.float32)
+        accumulator["pixel_count"] += int(flat_pixel_probs.shape[0])
+
+    if accumulator["ab_agg"] is None:
+        accumulator["ab_agg"] = analysis.get("ab_agg")
+
+
+def _summarize_prompt_channel_usage(prob_sum, prob_sq_sum, winner_count, total_count, level_name):
+    if prob_sum is None or prob_sq_sum is None or winner_count is None or total_count < 1:
+        return []
+    mean_prob = prob_sum / float(total_count)
+    variance = torch.clamp(prob_sq_sum / float(total_count) - mean_prob.square(), min=0.0)
+    std_prob = torch.sqrt(variance)
+    winner_ratio = winner_count / float(total_count)
+    rows = []
+    for channel_idx in range(mean_prob.numel()):
+        rows.append(
+            {
+                "level": level_name,
+                "channel_idx": channel_idx + 1,
+                "mean_prob": float(mean_prob[channel_idx].item()),
+                "std_prob": float(std_prob[channel_idx].item()),
+                "top1_winner_ratio": float(winner_ratio[channel_idx].item()),
+            }
+        )
+    return rows
+
+
+def _finalize_prompt_diag_accumulator(accumulator):
+    if accumulator is None or accumulator.get("abnormal_text_features") is None:
+        return None
+
+    abnormal_text_features = accumulator["abnormal_text_features"]
+    normalized_abnormal = F.normalize(abnormal_text_features, dim=-1)
+    similarity_matrix = torch.matmul(normalized_abnormal, normalized_abnormal.t()).cpu()
+    offdiag_mask = ~torch.eye(similarity_matrix.shape[0], dtype=torch.bool)
+    offdiag_values = similarity_matrix[offdiag_mask]
+    if offdiag_values.numel() > 0:
+        offdiag_stats = {
+            "mean": float(offdiag_values.mean().item()),
+            "max": float(offdiag_values.max().item()),
+            "min": float(offdiag_values.min().item()),
+        }
+    else:
+        offdiag_stats = {"mean": float("nan"), "max": float("nan"), "min": float("nan")}
+
+    return {
+        "ab_agg": accumulator.get("ab_agg"),
+        "update_calls": int(accumulator.get("update_calls", 0)),
+        "num_ab_prompts": int(similarity_matrix.shape[0]),
+        "prompt_similarity_matrix": similarity_matrix.tolist(),
+        "prompt_similarity_offdiag": offdiag_stats,
+        "channel_usage": _summarize_prompt_channel_usage(
+            accumulator.get("image_prob_sum"),
+            accumulator.get("image_prob_sq_sum"),
+            accumulator.get("image_winner_count"),
+            accumulator.get("image_count", 0),
+            "image",
+        )
+        + _summarize_prompt_channel_usage(
+            accumulator.get("pixel_prob_sum"),
+            accumulator.get("pixel_prob_sq_sum"),
+            accumulator.get("pixel_winner_count"),
+            accumulator.get("pixel_count", 0),
+            "pixel",
+        ),
+    }
+
+
+def _dump_prompt_diag_json(json_path, payload):
+    if not json_path:
+        return
+    os.makedirs(os.path.dirname(json_path), exist_ok=True)
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+
+
+def evaluation_pixel(clip_model:CLIP, dataset_name, dataloader, args, device, logger=None):
     pixel_gt_list = []
     pixel_score_list = []
     sample_gt_list = []
@@ -246,6 +395,12 @@ def evaluation_pixel(clip_model:CLIP, dataset_name, dataloader, args, device):
                 predict_labels, predict_masks = multi_view_inference(clip_model, imgs, args)
             else:
                 predict_labels, predict_masks = detect_single_view(clip_model, imgs, args)
+            prompt_diag_accumulator = getattr(clip_model, "_prompt_diag_accumulator", None)
+            if prompt_diag_accumulator is not None:
+                _update_prompt_diag_accumulator(
+                    prompt_diag_accumulator,
+                    getattr(clip_model, "_latest_prompt_analysis", None),
+                )
             
             predict_masks = F.interpolate(predict_masks, size=(imgs.size(-2), imgs.size(-1)), mode='bilinear').cpu().numpy()
             predict_masks = np.stack([gaussian_filter(mask, sigma=4) for mask in predict_masks])
@@ -282,6 +437,18 @@ def evaluation_pixel(clip_model:CLIP, dataset_name, dataloader, args, device):
 
 def eval_all_class(clip_model: CLIP, dataset_name, test_dataset, args, logger, device):
     total_res = []
+    logger.info(
+        "Evaluation prompt mode: use_cap_prompt=%s, fg_prompt=%s, cap_abnormal_agg=%s, ab_agg=%s",
+        bool(getattr(args, "use_cap_prompt", False)),
+        getattr(args, "fg_prompt", "off"),
+        getattr(args, "cap_abnormal_agg", "mean_feature"),
+        getattr(args, "ab_agg", "sum_prob"),
+    )
+    collect_prompt_diag = bool(getattr(args, "dump_prompt_diag_json", "")) and (
+        bool(getattr(args, "use_cap_prompt", False))
+        or getattr(clip_model, "fg_prompt_mode", "off") == "on"
+    )
+    clip_model._prompt_diag_accumulator = _init_prompt_diag_accumulator() if collect_prompt_diag else None
     if args.fewshot > 0:
         fewshot_dataset = copy.deepcopy(test_dataset)
         fewshot_dataset.train = True
@@ -309,7 +476,7 @@ def eval_all_class(clip_model: CLIP, dataset_name, test_dataset, args, logger, d
             # visualize_attention_map(clip_model, test_dataset, args, test_dataset.transform, device)
             visualize(clip_model, test_dataset, args, test_dataset.transform, device)
         else:
-            category_res = evaluation_pixel(clip_model, dataset_name, test_dataloader, args, device)
+            category_res = evaluation_pixel(clip_model, dataset_name, test_dataloader, args, device, logger=logger)
             total_res.append(category_res)
             res_str = get_res_str(category_res)
             logger.info("Category {}: {}".format(category, res_str))
@@ -317,4 +484,38 @@ def eval_all_class(clip_model: CLIP, dataset_name, test_dataset, args, logger, d
         average_res = cal_average_res(total_res)
         average_res_str = get_res_str(average_res)
         logger.info("Average: {}".format(average_res_str))
+        if collect_prompt_diag:
+            prompt_diag_payload = _finalize_prompt_diag_accumulator(getattr(clip_model, "_prompt_diag_accumulator", None))
+            if prompt_diag_payload is None:
+                fallback_accumulator = _init_prompt_diag_accumulator()
+                _update_prompt_diag_accumulator(fallback_accumulator, getattr(clip_model, "_latest_prompt_analysis", None))
+                prompt_diag_payload = _finalize_prompt_diag_accumulator(fallback_accumulator)
+            if prompt_diag_payload is not None:
+                prompt_diag_payload.update(
+                    {
+                        "source_dataset": getattr(args, "dataset", ""),
+                        "target_dataset": dataset_name,
+                        "use_cap_prompt": bool(getattr(args, "use_cap_prompt", False)),
+                        "fg_prompt": getattr(args, "fg_prompt", "off"),
+                        "num_ab_prompts": int(getattr(args, "num_ab_prompts", 1)),
+                        "cap_num_abnormal_prompts": int(getattr(args, "cap_num_abnormal_prompts", 1)),
+                        "cap_abnormal_agg": getattr(args, "cap_abnormal_agg", "mean_feature"),
+                        "seed": int(getattr(args, "seed", 0)),
+                        "log_dir": getattr(args, "log_dir", ""),
+                    }
+                )
+                _dump_prompt_diag_json(getattr(args, "dump_prompt_diag_json", ""), prompt_diag_payload)
+                offdiag = prompt_diag_payload["prompt_similarity_offdiag"]
+                logger.info(
+                    "Prompt diagnostics [{}]: updates={}, offdiag_cos mean={:.6f}, max={:.6f}, min={:.6f}".format(
+                        dataset_name,
+                        int(prompt_diag_payload.get("update_calls", 0)),
+                        float(offdiag["mean"]),
+                        float(offdiag["max"]),
+                        float(offdiag["min"]),
+                    )
+                )
+            else:
+                logger.warning("Prompt diagnostics [{}]: no prompt-analysis batches were captured".format(dataset_name))
+        clip_model._prompt_diag_accumulator = None
         
